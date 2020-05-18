@@ -1,0 +1,21 @@
+python3 ~/johnkim/deeplearning/estimator/SemanticClassifier.py \
+	--train \
+	-d \
+	-i ./prostate_input.txt \
+	-t ./prostate_input_mask.txt \
+	-o trained_model/ \
+	--loss CrossEntropy \
+	-model UNet2d \
+		--dropout_rate 0.50 \
+		--num_output_channels 2 \
+	--data_cache_limit 32 \
+	--patch_size 64 64 7 \
+	--target_patch_size 64 64 1 \
+	--target_patch_offset 0 0 3 \
+	--num_epochs 100 \
+	--epoch_size 5120 \
+	--batch_size 128 \
+	--data_normalization quantile \
+	--pad_size 0 0 3 \
+	--augment \
+		--flip 0 \
