@@ -5,3 +5,9 @@
 
 5-22-2020:
 - Created UNet2d from scratch with PyTorch, short training test
+
+5-28-2020:
+- Used MONAI implementation of a 2d Unet
+
+6-3-2020:
+- Full training test of my from-scratch UNet
