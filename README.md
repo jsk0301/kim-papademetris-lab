@@ -17,3 +17,5 @@ Since I'm most familiar with the 2D UNet, I'll start by tweaking/optimizing it a
 - Data augmentation: I'll be trying out a bunch of different transformations (thanks to MONAI, this should be easy to do) and seeing which ones help.
 - Optimizers/Loss
 - 
+
+Many output masks seem to be mostly empty - maybe there are too many images with no masking on them?
