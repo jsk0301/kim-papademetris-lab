@@ -1,0 +1,5 @@
+batch_size: 64
+epochs: 1000
+learning_rate: 0.001
+name: 6-9-2020_patched_64
+patch_size: 64

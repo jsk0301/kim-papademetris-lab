@@ -1,8 +1,8 @@
 python3 ~/johnkim/tools/deeplearning/estimator/SemanticClassifier.py \
 	--train \
 	-d \
-	-i lv_input_imgs \
-	-t lv_input_masks \
+	-i lv_train_imgs \
+	-t lv_train_masks \
 	-o trained_model/ \
 	--loss CrossEntropy \
 	-model UNet2d \

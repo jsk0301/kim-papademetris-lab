@@ -1,0 +1,14 @@
+python3 ~/johnkim/tools/deeplearning/estimator/SemanticClassifier.py \
+	-d \
+	-i lv_test_imgs \
+	-o predictions/ \
+    -model_path trained_model/ \
+	-model UNet2d \
+		--dropout_rate 0.15 \
+		--num_output_channels 2 \
+	--data_cache_limit 32 \
+	--patch_size 64 64 7 \
+	--target_patch_offset 0 0 3 \
+	--batch_size 16 \
+	--data_normalization quantile \
+	--pad_size 0 0 3 \

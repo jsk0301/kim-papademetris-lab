@@ -1,0 +1,16 @@
+SemanticClassifier.py \
+  --device gpu:0 \
+  -d \
+  -i /data/shared/abcd/input_lists/train_validation_test/abcd_master_test_resliced.txt \
+  -o predict_2d_t \
+  -model_path abcd_trained_model_2d/ \
+  -model UNet2d \
+    --dropout_rate 0.0 \
+    --num_output_channels 2 \
+  --patch_size 192 224 7 \
+  --stride_size 192 224 1 \
+  --target_patch_offset 0 0 3 \
+  --pad_size 0 0 3 \
+  --data_normalization quantile \
+  --batch_size 128 \
+  --data_cache_limit 32 \
