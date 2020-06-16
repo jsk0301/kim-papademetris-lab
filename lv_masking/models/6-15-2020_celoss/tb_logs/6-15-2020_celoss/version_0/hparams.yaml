@@ -1,0 +1,6 @@
+batch_size: 64
+epochs: 1000
+learning_rate: 0.001
+loss: CrossEntropy
+name: 6-15-2020_celoss
+patch_size: 256
