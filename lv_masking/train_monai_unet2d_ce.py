@@ -26,7 +26,7 @@ from pytorch_lightning.callbacks import EarlyStopping, ModelCheckpoint
 from pytorch_lightning.loggers import TensorBoardLogger
 
 # UNet model
-from MONAIUNet import UNet
+from MONAIUNet_CE import UNet
 
 
 ### Helper functions

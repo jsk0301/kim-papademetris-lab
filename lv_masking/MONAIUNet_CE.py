@@ -131,7 +131,7 @@ class UNet(LightningModule):
         inputs = inputs.squeeze(4)
         labels = labels.squeeze(4)
         outputs = self(inputs)
-        loss = self.criterion(outputs, labels)
+        loss = self.criterion(outputs, labels.squeeze(1))
         tensorboard_logs = {'loss/train': loss}
         return {'loss': loss, 'log': tensorboard_logs}
         
@@ -144,7 +144,7 @@ class UNet(LightningModule):
         inputs = inputs.squeeze(4)
         labels = labels.squeeze(4)
         outputs = self(inputs)
-        loss = self.criterion(outputs, labels)
+        loss = self.criterion(outputs, labels.squeeze(1))
         return {'val_loss': loss}
     
     def validation_epoch_end(self, outputs):
