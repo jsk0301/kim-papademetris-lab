@@ -1,0 +1,1 @@
+Using RandCropByPosNegId and no CropForeground. Using NormalizeIntensityd.
