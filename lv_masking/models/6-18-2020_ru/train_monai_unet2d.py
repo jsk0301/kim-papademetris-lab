@@ -7,6 +7,7 @@ import argparse
 # PyTorch imports
 import torch
 import torch.nn as nn
+from torch.utils.data import DataLoader
 
 # MONAI imports
 import monai
@@ -27,7 +28,7 @@ from pytorch_lightning import Trainer
 from pytorch_lightning.loggers import TensorBoardLogger
 
 # UNet model
-from UNet3d import UNet
+from MONAIUNet import UNet
 
 ### Helper functions
 def select_animals(images, masks, animals):
@@ -74,7 +75,7 @@ def get_data_loaders(batch_size, patch_size):
             AddChanneld(keys=data_keys),
             NormalizeIntensityd(keys="image"),
             RandCropByPosNegLabeld(
-                keys=data_keys, label_key="mask", size=patch_size, num_samples=16, image_key="image"
+                keys=data_keys, label_key="mask", size=(patch_size, patch_size, 1), num_samples=16, image_key="image"
             ),
             ToTensord(keys=data_keys),
         ]
@@ -112,11 +113,12 @@ def main(hparams):
     criterion = monai.losses.DiceLoss(to_onehot_y=True, softmax=True)
 
     model = UNet(
-        dimensions=3,
+        dimensions=2,
         in_channels=1,
         out_channels=2,
         channels=(64, 128, 258, 512, 1024),
         strides=(2, 2, 2, 2),
+        num_res_units=2,
         norm=monai.networks.layers.Norm.BATCH,
         criterion=criterion,
         hparams=hparams,
@@ -148,9 +150,8 @@ if __name__ == "__main__":
     parser.add_argument(
         "--patch-size",
         type=int,
-        required=True,
-        nargs=3,
-        help="Dimensions. Min depth is 16.",
+        default=256,
+        help="Width and height of patches. Default: 256.",
     )
     parser.add_argument(
         "--epochs", type=int, default=1000, help="Number of epochs. Default: 1000."

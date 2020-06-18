@@ -145,6 +145,8 @@ class UNet(LightningModule):
             batch["image"],
             batch["mask"],
         )
+        inputs = inputs.squeeze(4)
+        labels = labels.squeeze(4)
         outputs = self(inputs)
         loss = self.criterion(outputs, labels)
         tensorboard_logs = {"loss/train": loss}
@@ -159,8 +161,8 @@ class UNet(LightningModule):
             batch["image"],
             batch["mask"],
         )
-        print(inputs.shape)
-        print(labels.shape)
+        inputs = inputs.squeeze(4)
+        labels = labels.squeeze(4)
         outputs = self(inputs)
         loss = self.criterion(outputs, labels)
         return {"val_loss": loss}
