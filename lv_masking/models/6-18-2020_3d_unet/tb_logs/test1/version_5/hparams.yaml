@@ -1,8 +1,0 @@
-batch_size: 1
-epochs: 1000
-learning_rate: 0.001
-name: test1
-patch_size:
-- 128
-- 128
-- 16

@@ -1,3 +1,4 @@
-python train_monai_unet2d.py \
-	--name 6-16-2020_normalize \
-	--batch-size 4
+python train_monai_unet3d.py \
+	--name 6-18-2020_3d_unet \
+	--batch-size 4 \
+	--patch-size 128 128 16
