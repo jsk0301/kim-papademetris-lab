@@ -1,0 +1,11 @@
+batch_size: 1
+channels: !!python/tuple
+- 64
+- 128
+- 258
+- 512
+- 1024
+dimensions: 3
+dropout: 0
+lr: 0.001
+num_res_units: 0

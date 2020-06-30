@@ -19,3 +19,8 @@
 6-9-2020:
 - Testing effect of patch size: patches were 64x64x1
 - Results: no output masks at all??? Theory: blank patches dominate dataset
+
+
+So a lot of models happened that I didn't update. What I've learned, however, is that the largest factor by FAR is the size of the patch in all three dimensions. I've found that 256x256x16 patches achieve pretty accurate segmentations after just 44 epochs, so this is what I'll go off of.
+
+I need to have better testing metrics than just sampling the masks - I'll have to figure that out.
