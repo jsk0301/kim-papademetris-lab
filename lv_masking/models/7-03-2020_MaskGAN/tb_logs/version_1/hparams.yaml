@@ -1,7 +1,0 @@
-batch_size: 4
-lr: 0.001
-num_workers: 6
-patch_size: !!python/tuple
-- 256
-- 256
-- 16
