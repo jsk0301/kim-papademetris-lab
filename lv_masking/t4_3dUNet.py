@@ -274,10 +274,11 @@ class UNet(LightningModule):
 
     
 if __name__=="__main__":
-    NAME = 'models/6-29-2020/'
+    NAME = 'models/6-30-2020/'
     NUM_EPOCHS = 1000
 
-    criterion = monai.losses.DiceLoss(to_onehot_y=True, softmax=True)
+    # criterion = monai.losses.DiceLoss(to_onehot_y=True, softmax=True)
+    criterion = monai.losses.FocalLoss()
 
     model = UNet(
         data_dir='data/',
@@ -290,7 +291,8 @@ if __name__=="__main__":
         criterion=criterion,
         augmentations=Identityd(keys=["image", "mask"]),
         dropout=0,
-        lr=0.001
+        num_res_units=2,
+	batch_size=2,
     )
 
     logger = TensorBoardLogger(NAME + "tb_logs/", name='')
@@ -305,7 +307,8 @@ if __name__=="__main__":
 
 
     trainer = Trainer(
-        auto_scale_batch_size='binsearch',
+        # auto_lr_find=True,
+        # auto_scale_batch_size='binsearch',
         checkpoint_callback=checkpoint_callback,
         early_stop_callback=early_stopping,
         check_val_every_n_epoch=5,
