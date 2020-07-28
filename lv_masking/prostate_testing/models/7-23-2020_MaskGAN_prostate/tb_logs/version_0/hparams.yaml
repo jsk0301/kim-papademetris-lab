@@ -1,0 +1,9 @@
+batch_size: 4
+d_lr: 0.0001
+lr: 1.0e-05
+name: 7-23-2020_MaskGAN_prostate
+num_workers: 6
+patch_size:
+- 128
+- 128
+- 16
