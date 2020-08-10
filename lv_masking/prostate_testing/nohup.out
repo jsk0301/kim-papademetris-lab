@@ -1,0 +1,443 @@
+07/28/2020 01:53:47 PM INFO: Reading notebook t6_better_3dUNet_prostate.ipynb
+07/28/2020 01:53:49 PM INFO: Running cell:
+import pandas as pd
+
+import monai
+from monai.networks.nets import UNet
+from monai.transforms import (
+    Compose,
+    LoadNiftid,
+    ScaleIntensityd,
+    NormalizeIntensityd,
+    AddChanneld,
+    ToTensord,
+    RandSpatialCropd,
+    RandCropByPosNegLabeld,
+    CropForegroundd,
+    Identityd,
+)
+
+import torch
+import torch.nn as nn
+import torch.nn.functional as F
+import torchvision
+
+import pytorch_lightning as pl
+from sklearn.model_selection import train_test_split
+
+07/28/2020 01:54:00 PM INFO: Cell returned
+07/28/2020 01:54:00 PM INFO: Running cell:
+class UNet_DF(pl.LightningModule):
+    def __init__(self, hparams):
+        super().__init__()
+        self.hparams = hparams
+        
+        self.unet = UNet(
+            dimensions=3,
+            in_channels=1,
+            out_channels=2,
+            channels=(64, 128, 258, 512, 1024),
+            strides=(2, 2, 2, 2),
+            norm=monai.networks.layers.Norm.BATCH,
+            dropout=0,
+        )
+        self.sample_masks = []
+    
+    # Data setup
+    def setup(self, stage):
+        data_df = pd.read_csv('/data/shared/prostate/yale_prostate/input_lists/MR_yale.csv')
+        
+        train_imgs = data_df['IMAGE'][0:295].tolist()
+        train_masks = data_df['SEGM'][0:295].tolist()
+        
+        train_dicts = [{'image': image, 'mask': mask} for (image, mask) in zip(train_imgs, train_masks)]
+        
+        train_dicts, val_dicts = train_test_split(train_dicts, test_size=0.15)
+        
+        # Basic transforms
+        data_keys = ["image", "mask"]
+        data_transforms = Compose(
+            [
+                LoadNiftid(keys=data_keys),
+                AddChanneld(keys=data_keys),
+                NormalizeIntensityd(keys="image"),
+                RandCropByPosNegLabeld(
+                    keys=data_keys,
+                    label_key="mask",
+                    spatial_size=self.hparams.patch_size,
+                    num_samples=4,
+                    image_key="image",
+                    pos=0.7,
+                    neg=0.3
+                ),
+            ]
+        )
+        
+        self.train_dataset = monai.data.CacheDataset(
+            data=train_dicts,
+            transform=Compose(
+                [
+                    data_transforms,
+                    ToTensord(keys=data_keys)
+                ]
+            ),
+            cache_rate=1.0
+        )
+        
+        self.val_dataset = monai.data.CacheDataset(
+            data=val_dicts,
+            transform=Compose(
+                [
+                    data_transforms,
+                    ToTensord(keys=data_keys)
+                ]
+            ),
+            cache_rate=1.0
+        )
+        
+    def train_dataloader(self):
+        return monai.data.DataLoader(
+            self.train_dataset, batch_size=self.hparams.batch_size, shuffle=True, num_workers=self.hparams.num_workers
+        )
+
+    def val_dataloader(self):
+        return monai.data.DataLoader(
+            self.val_dataset, batch_size=self.hparams.batch_size, num_workers=self.hparams.num_workers
+        )
+    
+    # Training setup
+    def forward(self, image):
+        return self.unet(image)
+    
+    def criterion(self, y_hat, y):
+        dice_loss = monai.losses.DiceLoss(
+            to_onehot_y=True,
+            softmax=True
+        )
+        focal_loss = monai.losses.FocalLoss()
+        return dice_loss(y_hat, y) + focal_loss(y_hat, y)
+    
+    def training_step(self, batch, batch_idx):
+        inputs, labels = batch['image'], batch['mask']
+        outputs = self(inputs)
+        loss = self.criterion(outputs, labels)
+
+        self.logger.log_metrics({"loss/train": loss}, self.global_step)
+
+        return {'loss': loss}
+    
+    def configure_optimizers(self):
+        lr = self.hparams.lr
+        optimizer = torch.optim.Adam(self.unet.parameters(), lr=lr)
+        return optimizer
+    
+    def validation_step(self, batch, batch_idx):
+        inputs, labels = (
+            batch["image"],
+            batch["mask"],
+        )
+        outputs = self(inputs)
+        
+        # Sample masks
+        if self.current_epoch != 0:
+            middle = int(outputs[0].argmax(0).shape[2] / 2)
+            image = outputs[0].argmax(0)[:, :, middle].unsqueeze(0).detach()
+            self.sample_masks.append(image)
+        
+        loss = self.criterion(outputs, labels)
+        return {"val_loss": loss}
+
+    def validation_epoch_end(self, outputs):
+        avg_loss = torch.stack([x["val_loss"] for x in outputs]).mean()
+        self.logger.log_metrics({"loss/val": avg_loss}, self.current_epoch)
+        
+        if self.current_epoch != 0:
+            grid = torchvision.utils.make_grid(self.sample_masks)
+            self.logger.experiment.add_image('sample_masks', grid, self.current_epoch)
+            self.sample_masks = []
+        
+        return {"val_loss": avg_loss}
+
+07/28/2020 01:54:00 PM INFO: Cell returned
+07/28/2020 01:54:00 PM INFO: Running cell:
+from argparse import Namespace
+
+args = {
+    'name': '7-28-2020_pos_emphasized_prostate',
+    'batch_size': 4,
+    'lr': 0.001,
+    'patch_size': [128, 128, 16],
+    'num_workers': 6,
+}
+
+hparams = Namespace(**args)
+
+07/28/2020 01:54:00 PM INFO: Cell returned
+07/28/2020 01:54:00 PM INFO: Running cell:
+model = UNet_DF(hparams)
+
+07/28/2020 01:54:00 PM INFO: Cell returned
+07/28/2020 01:54:00 PM INFO: Running cell:
+# %reload_ext tensorboard
+# %load_ext tensorboard
+# %tensorboard --logdir models/7-8-2020_dicefocal/tb_logs/
+
+07/28/2020 01:54:00 PM INFO: Cell returned
+07/28/2020 01:54:00 PM INFO: Running cell:
+NAME = 'models/' + hparams.name
+logger = pl.loggers.TensorBoardLogger(NAME + "/tb_logs/", name='')
+
+# Callbacks
+early_stopping = pl.callbacks.EarlyStopping(
+    monitor='val_loss',
+    patience=10
+)
+
+checkpoint_callback = pl.callbacks.ModelCheckpoint(filepath=NAME + '/checkpoints/')
+
+
+trainer = pl.Trainer(
+    checkpoint_callback=checkpoint_callback,
+    early_stop_callback=early_stopping,
+    check_val_every_n_epoch=5,
+    gpus=1,
+    max_epochs=1000,
+    logger=logger,
+)
+
+trainer.fit(model)
+
+07/28/2020 02:23:45 PM INFO: Cell returned
+Traceback (most recent call last):
+  File "/data3/johnkim/environments/env_pytorch/bin/runipy", line 8, in <module>
+    sys.exit(main())
+  File "/data3/johnkim/environments/env_pytorch/lib/python3.8/site-packages/runipy/main.py", line 158, in main
+    nb_runner.run_notebook(skip_exceptions=args.skip_exceptions)
+  File "/data3/johnkim/environments/env_pytorch/lib/python3.8/site-packages/runipy/notebook_runner.py", line 232, in run_notebook
+    self.run_cell(cell)
+  File "/data3/johnkim/environments/env_pytorch/lib/python3.8/site-packages/runipy/notebook_runner.py", line 207, in run_cell
+    raise NotImplementedError(
+NotImplementedError: unhandled iopub message: comm_open
+[IPKernelApp] WARNING | Parent appears to have exited, shutting down.
+07/28/2020 02:56:06 PM INFO: Reading notebook t7_residuals_prostate.ipynb
+07/28/2020 02:56:08 PM INFO: Running cell:
+import pandas as pd
+
+import monai
+from monai.networks.nets import UNet
+from monai.transforms import (
+    Compose,
+    LoadNiftid,
+    ScaleIntensityd,
+    NormalizeIntensityd,
+    AddChanneld,
+    ToTensord,
+    RandSpatialCropd,
+    RandCropByPosNegLabeld,
+    CropForegroundd,
+    Identityd,
+)
+
+import torch
+import torch.nn as nn
+import torch.nn.functional as F
+import torchvision
+
+import pytorch_lightning as pl
+from sklearn.model_selection import train_test_split
+
+07/28/2020 02:56:18 PM INFO: Cell returned
+07/28/2020 02:56:18 PM INFO: Running cell:
+class UNet_DF(pl.LightningModule):
+    def __init__(self, hparams):
+        super().__init__()
+        self.hparams = hparams
+        
+        self.unet = UNet(
+            dimensions=3,
+            in_channels=1,
+            out_channels=2,
+            channels=(64, 128, 258, 512, 1024),
+            strides=(2, 2, 2, 2),
+            norm=monai.networks.layers.Norm.BATCH,
+            dropout=0,
+            num_res_units=2,
+        )
+        self.sample_masks = []
+    
+    # Data setup
+    def setup(self, stage):
+        data_df = pd.read_csv('/data/shared/prostate/yale_prostate/input_lists/MR_yale.csv')
+        
+        train_imgs = data_df['IMAGE'][0:295].tolist()
+        train_masks = data_df['SEGM'][0:295].tolist()
+        
+        train_dicts = [{'image': image, 'mask': mask} for (image, mask) in zip(train_imgs, train_masks)]
+        
+        train_dicts, val_dicts = train_test_split(train_dicts, test_size=0.15)
+        
+        # Basic transforms
+        data_keys = ["image", "mask"]
+        data_transforms = Compose(
+            [
+                LoadNiftid(keys=data_keys),
+                AddChanneld(keys=data_keys),
+                NormalizeIntensityd(keys="image"),
+                RandCropByPosNegLabeld(
+                    keys=data_keys,
+                    label_key="mask",
+                    spatial_size=self.hparams.patch_size,
+                    num_samples=4,
+                    image_key="image",
+                    pos=0.6,
+                    neg=0.4
+                ),
+            ]
+        )
+        
+        self.train_dataset = monai.data.CacheDataset(
+            data=train_dicts,
+            transform=Compose(
+                [
+                    data_transforms,
+                    ToTensord(keys=data_keys)
+                ]
+            ),
+            cache_rate=1.0
+        )
+        
+        self.val_dataset = monai.data.CacheDataset(
+            data=val_dicts,
+            transform=Compose(
+                [
+                    data_transforms,
+                    ToTensord(keys=data_keys)
+                ]
+            ),
+            cache_rate=1.0
+        )
+        
+    def train_dataloader(self):
+        return monai.data.DataLoader(
+            self.train_dataset, batch_size=self.hparams.batch_size, shuffle=True, num_workers=self.hparams.num_workers
+        )
+
+    def val_dataloader(self):
+        return monai.data.DataLoader(
+            self.val_dataset, batch_size=self.hparams.batch_size, num_workers=self.hparams.num_workers
+        )
+    
+    # Training setup
+    def forward(self, image):
+        return self.unet(image)
+    
+    def criterion(self, y_hat, y):
+        dice_loss = monai.losses.DiceLoss(
+            to_onehot_y=True,
+            softmax=True
+        )
+        focal_loss = monai.losses.FocalLoss()
+        return dice_loss(y_hat, y) + focal_loss(y_hat, y)
+    
+    def training_step(self, batch, batch_idx):
+        inputs, labels = batch['image'], batch['mask']
+        outputs = self(inputs)
+        loss = self.criterion(outputs, labels)
+
+        self.logger.log_metrics({"loss/train": loss}, self.global_step)
+
+        return {'loss': loss}
+    
+    def configure_optimizers(self):
+        lr = self.hparams.lr
+        optimizer = torch.optim.Adam(self.unet.parameters(), lr=lr)
+        return optimizer
+    
+    def validation_step(self, batch, batch_idx):
+        inputs, labels = (
+            batch["image"],
+            batch["mask"],
+        )
+        outputs = self(inputs)
+        
+        # Sample masks
+        if self.current_epoch != 0:
+            middle = int(outputs[0].argmax(0).shape[2] / 2)
+            image = outputs[0].argmax(0)[:, :, middle].unsqueeze(0).detach()
+            self.sample_masks.append(image)
+        
+        loss = self.criterion(outputs, labels)
+        return {"val_loss": loss}
+
+    def validation_epoch_end(self, outputs):
+        avg_loss = torch.stack([x["val_loss"] for x in outputs]).mean()
+        self.logger.log_metrics({"loss/val": avg_loss}, self.current_epoch)
+        
+        if self.current_epoch != 0:
+            grid = torchvision.utils.make_grid(self.sample_masks)
+            self.logger.experiment.add_image('sample_masks', grid, self.current_epoch)
+            self.sample_masks = []
+        
+        return {"val_loss": avg_loss}
+
+07/28/2020 02:56:18 PM INFO: Cell returned
+07/28/2020 02:56:18 PM INFO: Running cell:
+from argparse import Namespace
+
+args = {
+    'name': '7-28-2020_residual_prostate',
+    'batch_size': 4,
+    'lr': 0.0001,
+    'patch_size': [128, 128, 16],
+    'num_workers': 6,
+}
+
+hparams = Namespace(**args)
+
+07/28/2020 02:56:18 PM INFO: Cell returned
+07/28/2020 02:56:18 PM INFO: Running cell:
+model = UNet_DF(hparams)
+
+07/28/2020 02:56:19 PM INFO: Cell returned
+07/28/2020 02:56:19 PM INFO: Running cell:
+# %reload_ext tensorboard
+# %load_ext tensorboard
+# %tensorboard --logdir models/7-8-2020_dicefocal/tb_logs/
+
+07/28/2020 02:56:19 PM INFO: Cell returned
+07/28/2020 02:56:19 PM INFO: Running cell:
+NAME = 'models/' + hparams.name
+logger = pl.loggers.TensorBoardLogger(NAME + "/tb_logs/", name='')
+
+# Callbacks
+early_stopping = pl.callbacks.EarlyStopping(
+    monitor='val_loss',
+    patience=10
+)
+
+checkpoint_callback = pl.callbacks.ModelCheckpoint(filepath=NAME + '/checkpoints/')
+
+
+trainer = pl.Trainer(
+    checkpoint_callback=checkpoint_callback,
+    early_stop_callback=early_stopping,
+    check_val_every_n_epoch=5,
+    gpus=1,
+    max_epochs=1000,
+    logger=logger,
+)
+
+trainer.fit(model)
+
+07/28/2020 04:51:58 PM INFO: Cell returned
+Traceback (most recent call last):
+  File "/data3/johnkim/environments/env_pytorch/bin/runipy", line 8, in <module>
+    sys.exit(main())
+  File "/data3/johnkim/environments/env_pytorch/lib/python3.8/site-packages/runipy/main.py", line 158, in main
+    nb_runner.run_notebook(skip_exceptions=args.skip_exceptions)
+  File "/data3/johnkim/environments/env_pytorch/lib/python3.8/site-packages/runipy/notebook_runner.py", line 232, in run_notebook
+    self.run_cell(cell)
+  File "/data3/johnkim/environments/env_pytorch/lib/python3.8/site-packages/runipy/notebook_runner.py", line 207, in run_cell
+    raise NotImplementedError(
+NotImplementedError: unhandled iopub message: comm_open
+[IPKernelApp] WARNING | Parent appears to have exited, shutting down.

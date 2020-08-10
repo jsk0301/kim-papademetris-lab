@@ -1,0 +1,395 @@
+07/23/2020 02:46:34 PM INFO: Reading notebook t5_mask_GAN_prostate.ipynb
+07/23/2020 02:46:35 PM INFO: Running cell:
+import pandas as pd
+
+import monai
+from monai.networks.nets import UNet, Discriminator
+from monai.transforms import (
+    Compose,
+    LoadNiftid,
+    ScaleIntensityd,
+    NormalizeIntensityd,
+    AddChanneld,
+    ToTensord,
+    RandSpatialCropd,
+    RandCropByPosNegLabeld,
+    CropForegroundd,
+    Identityd,
+)
+
+import torch
+import torch.nn as nn
+import torch.nn.functional as F
+import torchvision
+
+import pytorch_lightning as pl
+from sklearn.model_selection import train_test_split
+
+07/23/2020 02:46:44 PM INFO: Cell returned
+07/23/2020 02:46:44 PM INFO: Running cell:
+class MaskGAN(pl.LightningModule):
+    def __init__(self, hparams):
+        super().__init__()
+        self.hparams = hparams
+        
+        self.generator = UNet(
+            dimensions=3,
+            in_channels=1,
+            out_channels=2,
+            channels=(64, 128, 258, 512, 1024),
+            strides=(2, 2, 2, 2),
+            norm=monai.networks.layers.Norm.BATCH,
+            dropout=0,
+        )
+        
+        self.discriminator = Discriminator(
+            in_shape=self.hparams.patch_size,
+            channels=(16, 32, 64, 128, 256),
+            strides=(2, 2, 2, 2),
+            norm=monai.networks.layers.Norm.BATCH,
+        )
+        
+        self.generated_masks = None
+        self.sample_masks = []
+    
+    # Data setup
+    def setup(self, stage):
+        data_df = pd.read_csv('/data/shared/prostate/yale_prostate/input_lists/MR_yale.csv')
+        
+        train_imgs = data_df['IMAGE'][0:295].tolist()
+        train_masks = data_df['SEGM'][0:295].tolist()
+        
+        train_dicts = [{'image': image, 'mask': mask} for (image, mask) in zip(train_imgs, train_masks)]
+        
+        train_dicts, val_dicts = train_test_split(train_dicts, test_size=0.15)
+        
+        # Basic transforms
+        data_keys = ["image", "mask"]
+        data_transforms = Compose(
+            [
+                LoadNiftid(keys=data_keys),
+                AddChanneld(keys=data_keys),
+                NormalizeIntensityd(keys="image"),
+                RandCropByPosNegLabeld(
+                    keys=data_keys,
+                    label_key="mask",
+                    spatial_size=self.hparams.patch_size,
+                    num_samples=4,
+                    image_key="image"
+                ),
+            ]
+        )
+        
+        self.train_dataset = monai.data.CacheDataset(
+            data=train_dicts,
+            transform=Compose(
+                [
+                    data_transforms,
+                    ToTensord(keys=data_keys)
+                ]
+            ),
+            cache_rate=1.0
+        )
+        
+        self.val_dataset = monai.data.CacheDataset(
+            data=val_dicts,
+            transform=Compose(
+                [
+                    data_transforms,
+                    ToTensord(keys=data_keys)
+                ]
+            ),
+            cache_rate=1.0
+        )
+        
+    def train_dataloader(self):
+        return monai.data.DataLoader(
+            self.train_dataset, batch_size=self.hparams.batch_size, shuffle=True, num_workers=hparams.num_workers
+        )
+
+    def val_dataloader(self):
+        return monai.data.DataLoader(
+            self.val_dataset, batch_size=self.hparams.batch_size, num_workers=hparams.num_workers
+        )
+    
+    # Training setup
+    def forward(self, image):
+        return self.generator(image)
+    
+    def generator_loss(self, y_hat, y):
+        dice_loss = monai.losses.DiceLoss(
+            to_onehot_y=True,
+            softmax=True
+        )
+        return dice_loss(y_hat, y)
+    
+    def adversarial_loss(self, y_hat, y):
+        return F.binary_cross_entropy(y_hat, y)
+    
+    def training_step(self, batch, batch_idx, optimizer_idx):
+        inputs, labels = batch['image'], batch['mask']
+        batch_size = inputs.size(0)
+        # Generator training
+        if optimizer_idx == 0:
+            self.generated_masks = self(inputs)
+            
+            # Loss from difference between real and generated masks
+            g_loss = self.generator_loss(
+                self.generated_masks,
+                labels
+            )
+            
+            # Loss from discriminator
+            # The generator wants the discriminator to be wrong,
+            # so the wrong labels are used
+            fake_labels = torch.ones(batch_size, 1).cuda(inputs.device.index)
+            d_loss = self.adversarial_loss(
+                self.discriminator(self.generated_masks.argmax(1).type(torch.FloatTensor).cuda(inputs.device.index)),
+                fake_labels
+            )
+            
+            avg_loss = (g_loss + d_loss) / 2
+            
+            self.logger.log_metrics({"g_train/g_loss": g_loss}, self.global_step)
+            self.logger.log_metrics({"g_train/d_loss": d_loss}, self.global_step)
+            self.logger.log_metrics({"g_train/tot_loss": avg_loss}, self.global_step)
+            return {'loss': avg_loss}
+            
+        # Discriminator trainig
+        else:
+            # Learning real masks
+            real_labels = torch.ones(batch_size, 1).cuda(inputs.device.index)
+            real_loss = self.adversarial_loss(
+                self.discriminator(labels.squeeze(1).type(torch.FloatTensor).cuda(inputs.device.index)),
+                real_labels
+            )
+            
+            # Learning "fake" masks
+            fake_labels = torch.zeros(batch_size, 1).cuda(inputs.device.index)
+            fake_loss = self.adversarial_loss(
+                self.discriminator(self.generated_masks.argmax(1).detach().type(torch.FloatTensor).cuda(inputs.device.index)),
+                fake_labels
+            )
+            
+            avg_loss = (real_loss + fake_loss) / 2
+            
+            self.logger.log_metrics({"d_train/real_loss": real_loss}, self.global_step)
+            self.logger.log_metrics({"d_train/fake_loss": fake_loss}, self.global_step)
+            self.logger.log_metrics({"d_train/tot_loss": avg_loss}, self.global_step)
+            
+            return {'loss': avg_loss}
+    
+    def configure_optimizers(self):
+        lr = self.hparams.lr
+        g_optimizer = torch.optim.Adam(self.generator.parameters(), lr=lr)
+        d_optimizer = torch.optim.Adam(self.discriminator.parameters(), lr=lr)
+        return [g_optimizer, d_optimizer], []
+    
+    def validation_step(self, batch, batch_idx):
+        inputs, labels = (
+            batch["image"],
+            batch["mask"],
+        )
+        outputs = self(inputs)
+        
+        # Sample masks
+        if self.current_epoch != 0:
+            image = outputs[0].argmax(0)[:, :, 40].unsqueeze(0).detach()
+            self.sample_masks.append(image)
+        
+        loss = self.generator_loss(outputs, labels)
+        return {"val_loss": loss}
+
+    def validation_epoch_end(self, outputs):
+        avg_loss = torch.stack([x["val_loss"] for x in outputs]).mean()
+        self.logger.log_metrics({"val/loss": avg_loss}, self.current_epoch)
+        
+        if self.current_epoch != 0:
+            grid = torchvision.utils.make_grid(self.sample_masks)
+            self.logger.experiment.add_image('sample_masks', grid, self.current_epoch)
+            self.sample_masks = []
+        
+        return {"val_loss": avg_loss}
+
+07/23/2020 02:46:44 PM INFO: Cell returned
+07/23/2020 02:46:44 PM INFO: Running cell:
+from argparse import Namespace
+
+args = {
+    'name': '7-23-2020_MaskGAN_prostate',
+    'batch_size': 2,
+    'lr': 0.00001,
+    'd_lr': 0.0001,
+    'patch_size': [128, 128, 64],
+    'num_workers': 6,
+}
+
+hparams = Namespace(**args)
+
+07/23/2020 02:46:44 PM INFO: Cell returned
+07/23/2020 02:46:44 PM INFO: Running cell:
+model = MaskGAN(hparams)
+
+07/23/2020 02:46:44 PM INFO: Cell returned
+07/23/2020 02:46:44 PM INFO: Running cell:
+# %reload_ext tensorboard
+# %tensorboard --logdir models/7-16-2020_MaskGAN2/tb_logs/
+
+07/23/2020 02:46:44 PM INFO: Cell returned
+07/23/2020 02:46:44 PM INFO: Running cell:
+NAME = 'models/' + hparams.name
+logger = pl.loggers.TensorBoardLogger(NAME + "/tb_logs/", name='')
+
+# Callbacks
+# early_stopping = pl.callbacks.EarlyStopping(
+#     monitor='val_loss',
+#     patience=10
+# )
+
+checkpoint_callback = pl.callbacks.ModelCheckpoint(filepath=NAME + '/checkpoints/')
+
+
+trainer = pl.Trainer(
+    checkpoint_callback=checkpoint_callback,
+#     early_stop_callback=early_stopping,
+    check_val_every_n_epoch=5,
+    gpus=1,
+    max_epochs=2000,
+    logger=logger,
+)
+
+trainer.fit(model)
+
+07/23/2020 02:46:50 PM INFO: Cell raised uncaught exception: 
+[0;31m---------------------------------------------------------------------------[0m
+[0;31mValueError[0m                                Traceback (most recent call last)
+[0;32m<ipython-input-6-d3faedd3765b>[0m in [0;36m<module>[0;34m[0m
+[1;32m     20[0m )
+[1;32m     21[0m [0;34m[0m[0m
+[0;32m---> 22[0;31m [0mtrainer[0m[0;34m.[0m[0mfit[0m[0;34m([0m[0mmodel[0m[0;34m)[0m[0;34m[0m[0;34m[0m[0m
+[0m
+[0;32m/data3/johnkim/environments/env_pytorch/lib/python3.8/site-packages/pytorch_lightning/trainer/trainer.py[0m in [0;36mfit[0;34m(self, model, train_dataloader, val_dataloaders)[0m
+[1;32m    926[0m [0;34m[0m[0m
+[1;32m    927[0m         [0;32melif[0m [0mself[0m[0;34m.[0m[0msingle_gpu[0m[0;34m:[0m[0;34m[0m[0;34m[0m[0m
+[0;32m--> 928[0;31m             [0mself[0m[0;34m.[0m[0msingle_gpu_train[0m[0;34m([0m[0mmodel[0m[0;34m)[0m[0;34m[0m[0;34m[0m[0m
+[0m[1;32m    929[0m [0;34m[0m[0m
+[1;32m    930[0m         [0;32melif[0m [0mself[0m[0;34m.[0m[0muse_tpu[0m[0;34m:[0m  [0;31m# pragma: no-cover[0m[0;34m[0m[0;34m[0m[0m
+
+[0;32m/data3/johnkim/environments/env_pytorch/lib/python3.8/site-packages/pytorch_lightning/trainer/distrib_parts.py[0m in [0;36msingle_gpu_train[0;34m(self, model)[0m
+[1;32m    181[0m             [0mself[0m[0;34m.[0m[0mreinit_scheduler_properties[0m[0;34m([0m[0mself[0m[0;34m.[0m[0moptimizers[0m[0;34m,[0m [0mself[0m[0;34m.[0m[0mlr_schedulers[0m[0;34m)[0m[0;34m[0m[0;34m[0m[0m
+[1;32m    182[0m [0;34m[0m[0m
+[0;32m--> 183[0;31m         [0mself[0m[0;34m.[0m[0mrun_pretrain_routine[0m[0;34m([0m[0mmodel[0m[0;34m)[0m[0;34m[0m[0;34m[0m[0m
+[0m[1;32m    184[0m [0;34m[0m[0m
+[1;32m    185[0m     [0;32mdef[0m [0mtpu_train[0m[0;34m([0m[0mself[0m[0;34m,[0m [0mtpu_core_idx[0m[0;34m,[0m [0mmodel[0m[0;34m)[0m[0;34m:[0m[0;34m[0m[0;34m[0m[0m
+
+[0;32m/data3/johnkim/environments/env_pytorch/lib/python3.8/site-packages/pytorch_lightning/trainer/trainer.py[0m in [0;36mrun_pretrain_routine[0;34m(self, model)[0m
+[1;32m   1081[0m             [0mnum_loaders[0m [0;34m=[0m [0mlen[0m[0;34m([0m[0mself[0m[0;34m.[0m[0mval_dataloaders[0m[0;34m)[0m[0;34m[0m[0;34m[0m[0m
+[1;32m   1082[0m             [0mmax_batches[0m [0;34m=[0m [0;34m[[0m[0mself[0m[0;34m.[0m[0mnum_sanity_val_steps[0m[0;34m][0m [0;34m*[0m [0mnum_loaders[0m[0;34m[0m[0;34m[0m[0m
+[0;32m-> 1083[0;31m             eval_results = self._evaluate(model,
+[0m[1;32m   1084[0m                                           [0mself[0m[0;34m.[0m[0mval_dataloaders[0m[0;34m,[0m[0;34m[0m[0;34m[0m[0m
+[1;32m   1085[0m                                           [0mmax_batches[0m[0;34m,[0m[0;34m[0m[0;34m[0m[0m
+
+[0;32m/data3/johnkim/environments/env_pytorch/lib/python3.8/site-packages/pytorch_lightning/trainer/evaluation_loop.py[0m in [0;36m_evaluate[0;34m(self, model, dataloaders, max_batches, test_mode)[0m
+[1;32m    268[0m             [0mdl_max_batches[0m [0;34m=[0m [0mmax_batches[0m[0;34m[[0m[0mdataloader_idx[0m[0;34m][0m[0;34m[0m[0;34m[0m[0m
+[1;32m    269[0m [0;34m[0m[0m
+[0;32m--> 270[0;31m             [0;32mfor[0m [0mbatch_idx[0m[0;34m,[0m [0mbatch[0m [0;32min[0m [0menumerate[0m[0;34m([0m[0mdataloader[0m[0;34m)[0m[0;34m:[0m[0;34m[0m[0;34m[0m[0m
+[0m[1;32m    271[0m                 [0;32mif[0m [0mbatch[0m [0;32mis[0m [0;32mNone[0m[0;34m:[0m[0;34m[0m[0;34m[0m[0m
+[1;32m    272[0m                     [0;32mcontinue[0m[0;34m[0m[0;34m[0m[0m
+
+[0;32m/data3/johnkim/environments/env_pytorch/lib/python3.8/site-packages/torch/utils/data/dataloader.py[0m in [0;36m__next__[0;34m(self)[0m
+[1;32m    343[0m [0;34m[0m[0m
+[1;32m    344[0m     [0;32mdef[0m [0m__next__[0m[0;34m([0m[0mself[0m[0;34m)[0m[0;34m:[0m[0;34m[0m[0;34m[0m[0m
+[0;32m--> 345[0;31m         [0mdata[0m [0;34m=[0m [0mself[0m[0;34m.[0m[0m_next_data[0m[0;34m([0m[0;34m)[0m[0;34m[0m[0;34m[0m[0m
+[0m[1;32m    346[0m         [0mself[0m[0;34m.[0m[0m_num_yielded[0m [0;34m+=[0m [0;36m1[0m[0;34m[0m[0;34m[0m[0m
+[1;32m    347[0m         [0;32mif[0m [0mself[0m[0;34m.[0m[0m_dataset_kind[0m [0;34m==[0m [0m_DatasetKind[0m[0;34m.[0m[0mIterable[0m [0;32mand[0m[0;31m [0m[0;31m\[0m[0;34m[0m[0;34m[0m[0m
+
+[0;32m/data3/johnkim/environments/env_pytorch/lib/python3.8/site-packages/torch/utils/data/dataloader.py[0m in [0;36m_next_data[0;34m(self)[0m
+[1;32m    836[0m             [0;32mif[0m [0mlen[0m[0;34m([0m[0mself[0m[0;34m.[0m[0m_task_info[0m[0;34m[[0m[0mself[0m[0;34m.[0m[0m_rcvd_idx[0m[0;34m][0m[0;34m)[0m [0;34m==[0m [0;36m2[0m[0;34m:[0m[0;34m[0m[0;34m[0m[0m
+[1;32m    837[0m                 [0mdata[0m [0;34m=[0m [0mself[0m[0;34m.[0m[0m_task_info[0m[0;34m.[0m[0mpop[0m[0;34m([0m[0mself[0m[0;34m.[0m[0m_rcvd_idx[0m[0;34m)[0m[0;34m[[0m[0;36m1[0m[0;34m][0m[0;34m[0m[0;34m[0m[0m
+[0;32m--> 838[0;31m                 [0;32mreturn[0m [0mself[0m[0;34m.[0m[0m_process_data[0m[0;34m([0m[0mdata[0m[0;34m)[0m[0;34m[0m[0;34m[0m[0m
+[0m[1;32m    839[0m [0;34m[0m[0m
+[1;32m    840[0m             [0;32massert[0m [0;32mnot[0m [0mself[0m[0;34m.[0m[0m_shutdown[0m [0;32mand[0m [0mself[0m[0;34m.[0m[0m_tasks_outstanding[0m [0;34m>[0m [0;36m0[0m[0;34m[0m[0;34m[0m[0m
+
+[0;32m/data3/johnkim/environments/env_pytorch/lib/python3.8/site-packages/torch/utils/data/dataloader.py[0m in [0;36m_process_data[0;34m(self, data)[0m
+[1;32m    879[0m         [0mself[0m[0;34m.[0m[0m_try_put_index[0m[0;34m([0m[0;34m)[0m[0;34m[0m[0;34m[0m[0m
+[1;32m    880[0m         [0;32mif[0m [0misinstance[0m[0;34m([0m[0mdata[0m[0;34m,[0m [0mExceptionWrapper[0m[0;34m)[0m[0;34m:[0m[0;34m[0m[0;34m[0m[0m
+[0;32m--> 881[0;31m             [0mdata[0m[0;34m.[0m[0mreraise[0m[0;34m([0m[0;34m)[0m[0;34m[0m[0;34m[0m[0m
+[0m[1;32m    882[0m         [0;32mreturn[0m [0mdata[0m[0;34m[0m[0;34m[0m[0m
+[1;32m    883[0m [0;34m[0m[0m
+
+[0;32m/data3/johnkim/environments/env_pytorch/lib/python3.8/site-packages/torch/_utils.py[0m in [0;36mreraise[0;34m(self)[0m
+[1;32m    393[0m             [0;31m# (https://bugs.python.org/issue2651), so we work around it.[0m[0;34m[0m[0;34m[0m[0;34m[0m[0m
+[1;32m    394[0m             [0mmsg[0m [0;34m=[0m [0mKeyErrorMessage[0m[0;34m([0m[0mmsg[0m[0;34m)[0m[0;34m[0m[0;34m[0m[0m
+[0;32m--> 395[0;31m         [0;32mraise[0m [0mself[0m[0;34m.[0m[0mexc_type[0m[0;34m([0m[0mmsg[0m[0;34m)[0m[0;34m[0m[0;34m[0m[0m
+[0m
+[0;31mValueError[0m: Caught ValueError in DataLoader worker process 1.
+Original Traceback (most recent call last):
+  File "/data3/johnkim/environments/env_pytorch/lib/python3.8/site-packages/monai/transforms/utils.py", line 276, in apply_transform
+    return transform(data)
+  File "/data3/johnkim/environments/env_pytorch/lib/python3.8/site-packages/monai/transforms/croppad/dictionary.py", line 387, in __call__
+    self.randomize(label, image)
+  File "/data3/johnkim/environments/env_pytorch/lib/python3.8/site-packages/monai/transforms/croppad/dictionary.py", line 379, in randomize
+    self.centers = generate_pos_neg_label_crop_centers(
+  File "/data3/johnkim/environments/env_pytorch/lib/python3.8/site-packages/monai/transforms/utils.py", line 202, in generate_pos_neg_label_crop_centers
+    raise ValueError("proposed roi is larger than image itself.")
+ValueError: proposed roi is larger than image itself.
+
+During handling of the above exception, another exception occurred:
+
+Traceback (most recent call last):
+  File "/data3/johnkim/environments/env_pytorch/lib/python3.8/site-packages/monai/transforms/utils.py", line 276, in apply_transform
+    return transform(data)
+  File "/data3/johnkim/environments/env_pytorch/lib/python3.8/site-packages/monai/transforms/compose.py", line 229, in __call__
+    input_ = apply_transform(_transform, input_)
+  File "/data3/johnkim/environments/env_pytorch/lib/python3.8/site-packages/monai/transforms/utils.py", line 278, in apply_transform
+    raise type(e)(f"applying transform {transform}.").with_traceback(e.__traceback__)
+  File "/data3/johnkim/environments/env_pytorch/lib/python3.8/site-packages/monai/transforms/utils.py", line 276, in apply_transform
+    return transform(data)
+  File "/data3/johnkim/environments/env_pytorch/lib/python3.8/site-packages/monai/transforms/croppad/dictionary.py", line 387, in __call__
+    self.randomize(label, image)
+  File "/data3/johnkim/environments/env_pytorch/lib/python3.8/site-packages/monai/transforms/croppad/dictionary.py", line 379, in randomize
+    self.centers = generate_pos_neg_label_crop_centers(
+  File "/data3/johnkim/environments/env_pytorch/lib/python3.8/site-packages/monai/transforms/utils.py", line 202, in generate_pos_neg_label_crop_centers
+    raise ValueError("proposed roi is larger than image itself.")
+ValueError: applying transform <monai.transforms.croppad.dictionary.RandCropByPosNegLabeld object at 0x7f04385efeb0>.
+
+During handling of the above exception, another exception occurred:
+
+Traceback (most recent call last):
+  File "/data3/johnkim/environments/env_pytorch/lib/python3.8/site-packages/torch/utils/data/_utils/worker.py", line 178, in _worker_loop
+    data = fetcher.fetch(index)
+  File "/data3/johnkim/environments/env_pytorch/lib/python3.8/site-packages/torch/utils/data/_utils/fetch.py", line 44, in fetch
+    data = [self.dataset[idx] for idx in possibly_batched_index]
+  File "/data3/johnkim/environments/env_pytorch/lib/python3.8/site-packages/torch/utils/data/_utils/fetch.py", line 44, in <listcomp>
+    data = [self.dataset[idx] for idx in possibly_batched_index]
+  File "/data3/johnkim/environments/env_pytorch/lib/python3.8/site-packages/monai/data/dataset.py", line 294, in __getitem__
+    data = apply_transform(_transform, data)
+  File "/data3/johnkim/environments/env_pytorch/lib/python3.8/site-packages/monai/transforms/utils.py", line 278, in apply_transform
+    raise type(e)(f"applying transform {transform}.").with_traceback(e.__traceback__)
+  File "/data3/johnkim/environments/env_pytorch/lib/python3.8/site-packages/monai/transforms/utils.py", line 276, in apply_transform
+    return transform(data)
+  File "/data3/johnkim/environments/env_pytorch/lib/python3.8/site-packages/monai/transforms/compose.py", line 229, in __call__
+    input_ = apply_transform(_transform, input_)
+  File "/data3/johnkim/environments/env_pytorch/lib/python3.8/site-packages/monai/transforms/utils.py", line 278, in apply_transform
+    raise type(e)(f"applying transform {transform}.").with_traceback(e.__traceback__)
+  File "/data3/johnkim/environments/env_pytorch/lib/python3.8/site-packages/monai/transforms/utils.py", line 276, in apply_transform
+    return transform(data)
+  File "/data3/johnkim/environments/env_pytorch/lib/python3.8/site-packages/monai/transforms/croppad/dictionary.py", line 387, in __call__
+    self.randomize(label, image)
+  File "/data3/johnkim/environments/env_pytorch/lib/python3.8/site-packages/monai/transforms/croppad/dictionary.py", line 379, in randomize
+    self.centers = generate_pos_neg_label_crop_centers(
+  File "/data3/johnkim/environments/env_pytorch/lib/python3.8/site-packages/monai/transforms/utils.py", line 202, in generate_pos_neg_label_crop_centers
+    raise ValueError("proposed roi is larger than image itself.")
+ValueError: applying transform <monai.transforms.compose.Compose object at 0x7f04385eff10>.
+
+Traceback (most recent call last):
+  File "/data3/johnkim/environments/env_pytorch/bin/runipy", line 8, in <module>
+    sys.exit(main())
+  File "/data3/johnkim/environments/env_pytorch/lib/python3.8/site-packages/runipy/main.py", line 158, in main
+    nb_runner.run_notebook(skip_exceptions=args.skip_exceptions)
+  File "/data3/johnkim/environments/env_pytorch/lib/python3.8/site-packages/runipy/notebook_runner.py", line 232, in run_notebook
+    self.run_cell(cell)
+  File "/data3/johnkim/environments/env_pytorch/lib/python3.8/site-packages/runipy/notebook_runner.py", line 207, in run_cell
+    raise NotImplementedError(
+NotImplementedError: unhandled iopub message: comm_open
+[IPKernelApp] WARNING | Parent appears to have exited, shutting down.
