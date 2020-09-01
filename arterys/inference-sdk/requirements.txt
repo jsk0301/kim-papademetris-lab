@@ -5,3 +5,8 @@ pydicom==1.4.2
 pyyaml==5.3.1
 requests-toolbelt==0.9.1
 SimpleITK==1.2.4
+torch==1.5.1
+torchvision==0.6.1
+monai==0.2.0
+pytorch-lightning==0.8.3
+scikit-learn==0.23.1

@@ -20,7 +20,8 @@ def convert_to_nifti(dicom_files, output_file):
         reader.SetFileNames(dicom_names)
         image = reader.Execute()
     else:
-        images_array = np.array([dcmread(DicomBytesIO(dcm.read())).pixel_array for dcm in dicom_files])
+        print(dicom_files)
+        images_array = np.array([dcmread(DicomBytesIO(dcm.read()), force=True).pixel_array for dcm in dicom_files])
         image = sitk.GetImageFromArray(images_array)
 
     print("Exporting Nifti file of size", image.GetSize())

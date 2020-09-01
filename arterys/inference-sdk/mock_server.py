@@ -50,37 +50,36 @@ def healthcheck_handler():
 
 def get_probability_mask_3D_response(json_input, dicom_instances):
     # Assuming that all files have the same size
-    dcm = pydicom.read_file(dicom_instances[0])
+    dcm = pydicom.read_file(dicom_instances[0], force=True)
     depth = len(dicom_instances)
     image_width = dcm.Columns
     image_height = dcm.Rows
     response_json = {
         'protocol_version': '1.0',
-        'parts': [
+        'parts':
+        [
             {
-                'label': 'Mock seg',
-                'binary_type': 'probability_mask',
+                'label': 'Test segmentation',
+                'binary_type': 'numeric_label_mask',
                 'binary_data_shape': {
                     'timepoints': 1,
                     'depth': depth,
                     'width': image_width,
                     'height': image_height
+                },
+                "SeriesInstanceUID": "1.1.1.1",
+                "label_map": {
+                    "0": "Non-Prostate",
+                    "1": "Prostate"
                 }
             }
         ]
     }
 
-    array_shape = (depth, image_height, image_width)
-
-    # This code produces a mask that grows from the center of the image outwards as the image slices advance
-    mask = numpy.zeros(array_shape, dtype=numpy.uint8)
-    mid_x = int(image_width / 2)
-    mid_y = int(image_height / 2)
-    for s in range(depth):
-        offset_x = int(s / depth * mid_x)
-        offset_y = int(s / depth * mid_y)
-        indices = numpy.ogrid[mid_y - offset_y : mid_y + offset_y, mid_x - offset_x : mid_x + offset_x]
-        mask[s][tuple(indices)] = 255
+    # array_shape = (depth, image_height, image_width)
+    
+    model = prostate_model.get_model()
+    mask = prostate_model.predict_mask(model, dicom_instances)
 
     return response_json, [mask]
 
@@ -94,7 +93,6 @@ def request_handler_3D_segmentation(json_input, dicom_instances, input_digest):
     return get_probability_mask_3D_response(json_input, dicom_instances)
 
 if __name__ == '__main__':
-    args = parse_args()
     app = Gateway(__name__)
     app.register_error_handler(Exception, handle_exception)
     app.add_inference_route('/', request_handler_3D_segmentation)

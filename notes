@@ -1,0 +1,29 @@
+get inference request: in form of http request
+ignore json input
+
+
+flask server accepts multipart requests
+- each part is 1 file
+- binary blob thrown at container
+- segmentations returned as binary blobs
+dicom_instances:
+
+inference test tool
+
+External executable within function
+
+separate file for my own stuff
+
+dicom_instances: list of byte objects
+pydicom.read_file: returns dicom
+- pydicom -> numpy
+- write dicom_instances to files, then convert to nifti, need to save in temp directory
+
+return response_json, 
+
+
+how docker works;
+to read and write files, either a. a host computer directory is mounted on the virtual container (but server is now bound to exact locations) or b. use a web server, interfacing is standardized. any binary file is called a "blob", has to be decoded, saved, etc.
+
+
+> install libgl1-mesa-dev for libGL.so.1 error
