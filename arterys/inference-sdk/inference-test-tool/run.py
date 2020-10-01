@@ -83,7 +83,7 @@ def upload_study_me(file_path, model_type, host, port, output_folder, attachment
         except:
             print('File {} is not a DICOM file'.format(image.path))
             continue
-
+    
     print('Sending {} files...'.format(len(images)))
     if send_study_size:
         request_json['depth'] = count

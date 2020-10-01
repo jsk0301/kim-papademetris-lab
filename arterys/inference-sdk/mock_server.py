@@ -50,10 +50,14 @@ def healthcheck_handler():
 
 def get_probability_mask_3D_response(json_input, dicom_instances):
     # Assuming that all files have the same size
-    dcm = pydicom.read_file(dicom_instances[0], force=True)
+    print(dicom_instances)
+    images = []
+    for instance in dicom_instances:
+        dcm = pydicom.dcmread(instance)
+        images.append(dcm)
     depth = len(dicom_instances)
-    image_width = dcm.Columns
-    image_height = dcm.Rows
+    image_width = images[0].Columns
+    image_height = images[0].Rows
     response_json = {
         'protocol_version': '1.0',
         'parts':
@@ -78,8 +82,8 @@ def get_probability_mask_3D_response(json_input, dicom_instances):
 
     # array_shape = (depth, image_height, image_width)
     
-    model = prostate_model.get_model()
-    mask = prostate_model.predict_mask(model, dicom_instances)
+    model = prostate_model.get_model('prostate_model_2.ckpt')
+    mask = prostate_model.predict_mask(model, images)
 
     return response_json, [mask]
 

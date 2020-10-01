@@ -1,5 +1,5 @@
 from utils import image_conversion
-
+import pydicom
 import monai
 from monai.networks.nets import UNet, Discriminator
 from monai.transforms import (
@@ -78,7 +78,6 @@ class MaskGAN(pl.LightningModule):
         data_keys = ["image", "mask"]
         data_transforms = Compose(
             [
-                LoadNiftid(keys=data_keys),
                 AddChanneld(keys=data_keys),
                 NormalizeIntensityd(keys="image"),
                 RandCropByPosNegLabeld(
@@ -222,33 +221,166 @@ class MaskGAN(pl.LightningModule):
 
         return {"val_loss": avg_loss}
 
-
-def get_model():
-    return MaskGAN.load_from_checkpoint('prostate_model.ckpt')
-
-def predict_mask(model, dicom_instances):
-    # Convert directory of dicom slices to nifti
-    image_conversion.convert_to_nifti(dicom_instances, 'temp/temp.nii.gz')
-    test_dataset = monai.data.NiftiDataset(
-        image_files=['temp/temp.nii.gz'],
-        transform=Compose(
+class UNet_DF(pl.LightningModule):
+    def __init__(self, hparams):
+        super().__init__()
+        self.hparams = hparams
+        
+        self.unet = UNet(
+            dimensions=3,
+            in_channels=1,
+            out_channels=2,
+            channels=(64, 128, 258, 512, 1024),
+            strides=(2, 2, 2, 2),
+            norm=monai.networks.layers.Norm.BATCH,
+            dropout=0,
+        )
+        self.sample_masks = []
+    
+    # Data setup
+    def setup(self, stage):
+        data_df = pd.read_csv('/data/shared/prostate/yale_prostate/input_lists/MR_yale.csv')
+        
+        train_imgs = data_df['IMAGE'][0:295].tolist()
+        train_masks = data_df['SEGM'][0:295].tolist()
+        
+        train_dicts = [{'image': image, 'mask': mask} for (image, mask) in zip(train_imgs, train_masks)]
+        
+        train_dicts, val_dicts = train_test_split(train_dicts, test_size=0.15)
+        
+        # Basic transforms
+        data_keys = ["image", "mask"]
+        data_transforms = Compose(
             [
-                AddChannel(),
-                NormalizeIntensity(),
-                ToTensor()
+                LoadNiftid(keys=data_keys),
+                AddChanneld(keys=data_keys),
+                NormalizeIntensityd(keys="image"),
+                RandCropByPosNegLabeld(
+                    keys=data_keys,
+                    label_key="mask",
+                    spatial_size=self.hparams.patch_size,
+                    num_samples=4,
+                    image_key="image",
+                    pos=0.7,
+                    neg=0.3
+                ),
             ]
         )
-    )
-
-    for sample in test_dataset:
-        test_image = sample['image'].unsqueeze(0)
         
-        test_mask = sliding_window_inference(
-            test_image,
-            roi_size=[128, 128, 16],
-            sw_batch_size=1,
-            predictor=model
+        self.train_dataset = monai.data.CacheDataset(
+            data=train_dicts,
+            transform=Compose(
+                [
+                    data_transforms,
+                    ToTensord(keys=data_keys)
+                ]
+            ),
+            cache_rate=1.0
         )
         
-        test_mask = test_mask.argmax(1).detach()
+        self.val_dataset = monai.data.CacheDataset(
+            data=val_dicts,
+            transform=Compose(
+                [
+                    data_transforms,
+                    ToTensord(keys=data_keys)
+                ]
+            ),
+            cache_rate=1.0
+        )
+        
+    def train_dataloader(self):
+        return monai.data.DataLoader(
+            self.train_dataset, batch_size=self.hparams.batch_size, shuffle=True, num_workers=self.hparams.num_workers
+        )
+
+    def val_dataloader(self):
+        return monai.data.DataLoader(
+            self.val_dataset, batch_size=self.hparams.batch_size, num_workers=self.hparams.num_workers
+        )
+    
+    # Training setup
+    def forward(self, image):
+        return self.unet(image)
+    
+    def criterion(self, y_hat, y):
+        dice_loss = monai.losses.DiceLoss(
+            to_onehot_y=True,
+            softmax=True
+        )
+        focal_loss = monai.losses.FocalLoss()
+        return dice_loss(y_hat, y) + focal_loss(y_hat, y)
+    
+    def training_step(self, batch, batch_idx):
+        inputs, labels = batch['image'], batch['mask']
+        outputs = self(inputs)
+        loss = self.criterion(outputs, labels)
+
+        self.logger.log_metrics({"loss/train": loss}, self.global_step)
+
+        return {'loss': loss}
+    
+    def configure_optimizers(self):
+        lr = self.hparams.lr
+        optimizer = torch.optim.Adam(self.unet.parameters(), lr=lr)
+        return optimizer
+    
+    def validation_step(self, batch, batch_idx):
+        inputs, labels = (
+            batch["image"],
+            batch["mask"],
+        )
+        outputs = self(inputs)
+        
+        # Sample masks
+        if self.current_epoch != 0:
+            middle = int(outputs[0].argmax(0).shape[2] / 2)
+            image = outputs[0].argmax(0)[:, :, middle].unsqueeze(0).detach()
+            self.sample_masks.append(image)
+        
+        loss = self.criterion(outputs, labels)
+        return {"val_loss": loss}
+
+    def validation_epoch_end(self, outputs):
+        avg_loss = torch.stack([x["val_loss"] for x in outputs]).mean()
+        self.logger.log_metrics({"loss/val": avg_loss}, self.current_epoch)
+        
+        if self.current_epoch != 0:
+            grid = torchvision.utils.make_grid(self.sample_masks)
+            self.logger.experiment.add_image('sample_masks', grid, self.current_epoch)
+            self.sample_masks = []
+        
+        return {"val_loss": avg_loss}
+
+
+def get_model(ckpt):
+    return UNet_DF.load_from_checkpoint(ckpt)
+
+def predict_mask(model, images):
+    image_array = []
+    for image in images:
+        image_array.append(image.pixel_array)
+    image_array = np.expand_dims(np.transpose(np.array(image_array).astype('float32')), (0, 1))
+    data_transforms = Compose([
+        AddChannel(),
+        NormalizeIntensity(),
+        ToTensor()
+    ])
+
+    dataset = monai.data.Dataset(
+        data=image_array,
+        transform=data_transforms
+    )
+
+    print(dataset[0].shape)
+    test_mask = sliding_window_inference(
+        dataset[0],
+        roi_size=[128, 128, 16],
+        sw_batch_size=1,
+        predictor=model
+    )
+    test_mask = test_mask.argmax(1).detach().cpu().numpy()
+    test_mask = np.transpose(np.squeeze(test_mask, 0))
+    test_mask = test_mask.astype('uint8')
+    test_mask = np.asarray(test_mask, order='C')
     return test_mask
