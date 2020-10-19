@@ -1,0 +1,9 @@
+batch_size: 2
+data_dir: ../data/new/
+lr: 0.001
+name: 2020-10-14_UNet_NewData
+num_workers: 6
+patch_size:
+- 256
+- 256
+- 16
