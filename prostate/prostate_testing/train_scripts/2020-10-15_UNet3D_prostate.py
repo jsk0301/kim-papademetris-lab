@@ -4,7 +4,7 @@ from argparse import Namespace
 import os, sys
 sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
-from lightning_modules.UNet3D import UNet3D
+from lightning_modules.UNet3D_Spacing import UNet3D
 
 if __name__ == '__main__':
     args = {
